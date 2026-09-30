@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Assessment Voice Recorder</title>
+  <style>
+    body { font-family:Arial,sans-serif; margin:0; background:#111827; color:white; }
+    .wrap { max-width:680px; margin:24px auto; padding:18px; }
+    .card { background:#1f2937; padding:20px; border-radius:14px; }
+    .prompt { background:#374151; padding:14px; border-radius:8px; line-height:1.5; }
+    button { border:0; border-radius:8px; padding:11px 16px; margin-right:8px; font-size:15px; }
+    #start { background:#22c55e; }
+    #stop { background:#ef4444; color:white; }
+    #cancel { background:#6b7280; color:white; }
+    .timer { font-size:28px; font-weight:700; margin:14px 0; }
+    .status { margin-top:12px; color:#d1d5db; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>Voice recorder</h1>
+    <div id="prompt" class="prompt"></div>
+    <p>
+      Your browser will ask for microphone permission. No camera access is used.
+      The recording is sent back only to the assessment window that opened this recorder.
+    </p>
+
+    <div id="timer" class="timer">Ready</div>
+
+    <p>
+      <button id="start">Start recording</button>
+      <button id="stop" disabled>Stop & send</button>
+      <button id="cancel">Cancel</button>
+    </p>
+
+    <div id="status" class="status"></div>
+  </div>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const nonce = params.get('nonce') || '';
+const maxSeconds = Math.min(60, Math.max(5, Number(params.get('max') || 20)));
+const promptText = params.get('prompt') || '';
+const targetOrigin = params.get('targetOrigin') || '*';
+
+document.getElementById('prompt').textContent = promptText;
+
+let stream = null;
+let recorder = null;
+let chunks = [];
+let startedAt = 0;
+let timer = null;
+
+function chooseMime() {
+  const candidates = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/ogg;codecs=opus'
+  ];
+
+  for (const t of candidates) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported(t)) return t;
+  }
+  return '';
+}
+
+async function startRecording() {
+  document.getElementById('status').textContent = 'Requesting microphone permission…';
+
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: false,
+      audio: { channelCount: 1 }
+    });
+
+    const mime = chooseMime();
+    const options = {};
+    if (mime) options.mimeType = mime;
+    options.audioBitsPerSecond = 64000;
+
+    chunks = [];
+    recorder = new MediaRecorder(stream, options);
+    recorder.ondataavailable = e => {
+      if (e.data && e.data.size) chunks.push(e.data);
+    };
+    recorder.onstop = sendRecording;
+    recorder.start(500);
+
+    startedAt = Date.now();
+    document.getElementById('start').disabled = true;
+    document.getElementById('stop').disabled = false;
+    document.getElementById('status').textContent = 'Recording…';
+
+    updateTimer();
+    timer = setInterval(updateTimer, 200);
+  } catch (err) {
+    document.getElementById('status').textContent =
+      'Could not start microphone: ' + err.message;
+  }
+}
+
+function updateTimer() {
+  const elapsed = (Date.now() - startedAt) / 1000;
+  const left = Math.max(0, maxSeconds - elapsed);
+  document.getElementById('timer').textContent = left.toFixed(1) + ' s';
+
+  if (left <= 0 && recorder && recorder.state === 'recording') {
+    stopRecording();
+  }
+}
+
+function stopRecording() {
+  if (!recorder || recorder.state !== 'recording') return;
+  clearInterval(timer);
+  document.getElementById('stop').disabled = true;
+  document.getElementById('status').textContent = 'Preparing recording…';
+  recorder.stop();
+}
+
+function stopTracks() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+}
+
+function sendRecording() {
+  const durationMs = Date.now() - startedAt;
+  const mimeType = recorder.mimeType || 'audio/webm';
+  const blob = new Blob(chunks, { type: mimeType });
+
+  stopTracks();
+
+  const reader = new FileReader();
+  reader.onloadend = () => {
+    const result = String(reader.result || '');
+    const comma = result.indexOf(',');
+    const base64 = comma >= 0 ? result.slice(comma + 1) : '';
+
+    if (!window.opener) {
+      document.getElementById('status').textContent =
+        'The assessment window is no longer available. Re-open the recorder from the assessment.';
+      return;
+    }
+
+    try {
+      window.opener.postMessage({
+        type: 'assessment-media',
+        nonce,
+        mimeType,
+        durationMs,
+        base64
+      }, targetOrigin);
+
+      document.getElementById('status').textContent =
+        'Voice recording sent. You can close this window.';
+
+      setTimeout(() => window.close(), 1000);
+    } catch (err) {
+      document.getElementById('status').textContent =
+        'Could not send recording: ' + err.message;
+    }
+  };
+
+  reader.readAsDataURL(blob);
+}
+
+document.getElementById('start').addEventListener('click', startRecording);
+document.getElementById('stop').addEventListener('click', stopRecording);
+
+document.getElementById('cancel').addEventListener('click', () => {
+  clearInterval(timer);
+
+  if (recorder && recorder.state === 'recording') {
+    recorder.onstop = null;
+    recorder.stop();
+  }
+
+  stopTracks();
+  window.close();
+});
+
+window.addEventListener('beforeunload', stopTracks);
+</script>
+</body>
+</html>
